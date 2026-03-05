@@ -50,20 +50,23 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # Đọc dữ liệu hiện có (Tắt cache để luôn lấy dữ liệu mới nhất)
 df_existing = conn.read(spreadsheet=url_sheet, worksheet=0, ttl=0)
 
-# Xử lý số dư và tiền thực tế
+# Chuyển đổi dữ liệu an toàn
 if not df_existing.empty:
-    # Chuyển đổi ngày an toàn hơn, bỏ qua các dòng lỗi định dạng ngày
+    # Đảm bảo các cột quan trọng tồn tại
+    for col in ['Ngay', 'Loai', 'so tien', 'Ghi chu']:
+        if col not in df_existing.columns:
+            df_existing[col] = ""
+
+    # Ép kiểu dữ liệu
+    df_existing['so tien'] = pd.to_numeric(df_existing['so tien'], errors='coerce').fillna(0)
     df_existing['Ngay'] = pd.to_datetime(df_existing['Ngay'], errors='coerce')
     
-    # Bỏ các dòng không thể nhận diện ngày (ví dụ dòng trống hoặc sai định dạng)
-    invalid_dates = df_existing['Ngay'].isna().sum()
-    if invalid_dates > 0:
-        st.sidebar.warning(f"⚠️ Có {invalid_dates} dòng dữ liệu sai định dạng ngày và đã được bỏ qua.")
+    # Bỏ các dòng không hợp lệ
     df_existing = df_existing.dropna(subset=['Ngay'])
     
-    # Tiếp tục tính toán
+    # Tính toán số dư
     df_existing['so_tien_plus'] = df_existing.apply(
-        lambda x: x['so tien'] if x['Loai'] == 'Thu nhập' else -x['so tien'], axis=1
+        lambda x: x['so tien'] if str(x['Loai']).strip() == 'Thu nhập' else -x['so tien'], axis=1
     )
     df_existing['Số dư sau GD'] = df_existing['so_tien_plus'].cumsum()
     tong_so_du = df_existing['so_tien_plus'].sum()
@@ -92,13 +95,8 @@ with tab1:
             st.metric("Tổng Chi", f"-{tong_chi:,.0f}".replace(",", "."), delta_color="inverse")
 
         st.subheader("📈 Xu hướng gần đây")
-        # Chuẩn bị dữ liệu cho biểu đồ (Gộp theo ngày)
         chart_data = df_existing.groupby(['Ngay', 'Loai'])['so tien'].sum().unstack(fill_value=0)
-        
-        # Định nghĩa màu sắc: Thu nhập (Xanh), Chi tiêu (Đỏ)
         color_map = {"Thu nhập": "#2ecc71", "Chi tiêu": "#e74c3c"}
-        
-        # Hiển thị biểu đồ với màu tùy chỉnh
         st.bar_chart(chart_data, color=[color_map.get(col, "#bdbdbd") for col in chart_data.columns])
     else:
         st.info("Chưa có dữ liệu để hiển thị biểu đồ sếp ơi!")
@@ -128,29 +126,40 @@ with tab2:
             "Số tiền (VNĐ):", 
             key="so_tien_formatted", 
             on_change=format_amount_callback,
-            help="Sếp nhập số xong em tự thêm dấu chấm nhé!"
         )
         
         so_tien_clean = st.session_state.so_tien_formatted.replace(".", "")
         so_tien = int(so_tien_clean) if so_tien_clean.isdigit() else 0
-        
         ghi_chu = st.text_input("Ghi chú / Nội dung:")
         
         if st.button("Lưu lên Cloud ☁️", use_container_width=True):
             if so_tien <= 0:
                 st.error("Dạ sếp, tiền phải lớn hơn 0 mới được ạ! ❌")
             else:
-                new_data = pd.DataFrame([{
-                    "Ngay": ngay.strftime("%Y-%m-%d"),
-                    "Loai": loai,
-                    "so tien": so_tien,
-                    "Ghi chu": ghi_chu
-                }])
-                updated_df = pd.concat([df_existing.drop(columns=['so_tien_plus', 'Số dư sau GD', 'Month_Year'], errors='ignore'), new_data], ignore_index=True)
-                conn.update(spreadsheet=url_sheet, worksheet=0, data=updated_df)
-                st.success("Đã đồng bộ thành công! ✅")
-                st.toast("Đã hoàn thành cập nhật! ☁️", icon="✅")
-                st.rerun()
+                with st.spinner("Đang lưu dữ liệu lên Google Sheets..."):
+                    # Tạo dòng mới
+                    new_row = pd.DataFrame([{
+                        "Ngay": ngay.strftime("%Y-%m-%d"),
+                        "Loai": loai,
+                        "so tien": so_tien,
+                        "Ghi chu": ghi_chu
+                    }])
+                    
+                    # Chuẩn bị dữ liệu để lưu (xóa cột phụ và chuyển ngày về string)
+                    df_to_save = df_existing.copy()
+                    if not df_to_save.empty:
+                        df_to_save['Ngay'] = df_to_save['Ngay'].dt.strftime('%Y-%m-%d')
+                    
+                    # Các cột cần bỏ trước khi lưu
+                    cols_to_drop = ['so_tien_plus', 'Số dư sau GD', 'Month_Year']
+                    df_to_save = df_to_save.drop(columns=[c for c in cols_to_drop if c in df_to_save.columns], errors='ignore')
+                    
+                    # Gộp và cập nhật
+                    updated_df = pd.concat([df_to_save, new_row], ignore_index=True)
+                    conn.update(spreadsheet=url_sheet, worksheet=0, data=updated_df)
+                    
+                    st.success("Đã lưu thành công! ✅")
+                    st.rerun()
 
 # ==========================================
 # TAB 3: LỊCH SỬ & SAO KÊ
@@ -163,51 +172,47 @@ with tab3:
         df_filtered = df_existing.copy()
 
         if filter_type == "Tháng":
-            df_existing['Month_Year'] = df_existing['Ngay'].dt.strftime('%m/%Y')
-            month_list = sorted(df_existing['Month_Year'].unique().tolist(), reverse=True)
+            df_filtered['Month_Year'] = df_filtered['Ngay'].dt.strftime('%m/%Y')
+            month_list = sorted(df_filtered['Month_Year'].unique().tolist(), reverse=True)
             selected_month = st.selectbox("Chọn tháng:", month_list)
-            df_filtered = df_existing[df_existing['Month_Year'] == selected_month]
+            df_filtered = df_filtered[df_filtered['Month_Year'] == selected_month]
         
         elif filter_type == "Khoảng ngày":
             col1, col2 = st.columns(2)
             with col1:
-                d1 = st.date_input("Từ ngày:", df_existing['Ngay'].min())
+                d1 = st.date_input("Từ ngày:", df_existing['Ngay'].min().date())
             with col2:
-                d2 = st.date_input("Đến ngày:", datetime.now())
-            df_filtered = df_existing[(df_existing['Ngay'] >= pd.to_datetime(d1)) & (df_existing['Ngay'] <= pd.to_datetime(d2))]
+                d2 = st.date_input("Đến ngày:", datetime.now().date())
+            df_filtered = df_existing[(df_existing['Ngay'].dt.date >= d1) & (df_existing['Ngay'].dt.date <= d2)]
 
-        # --- NÚT XUẤT EXCEL ---
+        # Hiển thị bảng
         if not df_filtered.empty:
-            # Tạo file excel trong bộ nhớ
+            # Nút xuất Excel
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                # Chỉ xuất các cột cần thiết
                 df_export = df_filtered[["Ngay", "Loai", "so tien", "Ghi chu", "Số dư sau GD"]].copy()
                 df_export['Ngay'] = df_export['Ngay'].dt.strftime('%d/%m/%Y')
                 df_export.to_excel(writer, index=False, sheet_name='SaoKe')
             
-            processed_data = output.getvalue()
-            
             st.download_button(
                 label="📥 Tải file Excel sao kê",
-                data=processed_data,
-                file_name=f"SaoKe_TaiChinh_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                data=output.getvalue(),
+                file_name=f"SaoKe_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-            # Hiển thị bảng
             st.markdown("---")
             df_display = df_filtered.copy()
             df_display.insert(0, 'STT', range(1, len(df_display) + 1))
-            df_display['Ngay'] = df_display['Ngay'].dt.strftime('%d/%m/%Y')
+            df_display['Ngay_ST'] = df_display['Ngay'].dt.strftime('%d/%m/%Y')
             df_display["Tiền"] = df_display["so tien"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
             df_display["Số dư"] = df_display["Số dư sau GD"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
             
             st.dataframe(
-                df_display[["STT", "Ngay", "Loai", "Tiền", "Ghi chu", "Số dư"]], 
+                df_display[["STT", "Ngay_ST", "Loai", "Tiền", "Ghi chu", "Số dư"]].rename(columns={"Ngay_ST": "Ngay"}), 
                 use_container_width=True, hide_index=True
             )
         else:
-            st.warning("Không tìm thấy dữ liệu phù hợp!")
+            st.warning("Không tìm thấy dữ liệu!")
     else:
         st.warning("Chưa có dữ liệu nào sếp ơi!")
