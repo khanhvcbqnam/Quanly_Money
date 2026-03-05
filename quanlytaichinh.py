@@ -2,12 +2,47 @@ import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
+import io
 
 # --- CẤU HÌNH ---
-st.set_page_config(page_title="Tài chính Cloud - Canhnho", layout="centered")
+st.set_page_config(page_title="Tài chính Cloud - Canhnho", layout="centered", page_icon="☁️")
 
-# URL file Google Sheets của sếp (Thay link này bằng link file của sếp nhé)
-url_sheet = "https://docs.google.com/spreadsheets/d/1zZR62bWmpGSR8Js-grYHL97GzJYBAQBUwf-fm7bh8n0/edit?gid=0#gid=0"
+# CSS để App trông "xịn" hơn trên điện thoại
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f8f9fa;
+    }
+    .stButton>button {
+        width: 100%;
+        border-radius: 10px;
+        height: 3em;
+        background-color: #00b4d8;
+        color: white;
+        border: none;
+        font-weight: bold;
+    }
+    .stMetric {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    }
+    div[data-testid="stExpander"] {
+        border-radius: 15px;
+        border: none;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        background-color: white;
+    }
+    /* Ẩn header mặc định của Streamlit */
+    header {visibility: hidden;}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+    """, unsafe_allow_html=True)
+
+# URL file Google Sheets của sếp
+url_sheet = "https://docs.google.com/spreadsheets/d/1zZR62bWmpGSR8Js-grYHL97GzJYBAQBUwf-fm7bh8n0/edit"
 
 # --- KẾT NỐI GOOGLE SHEETS ---
 conn = st.connection("gsheets", type=GSheetsConnection)
@@ -15,118 +50,155 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 # Đọc dữ liệu hiện có (Tắt cache để luôn lấy dữ liệu mới nhất)
 df_existing = conn.read(spreadsheet=url_sheet, worksheet=0, ttl=0)
 
-# --- XỬ LÝ SỐ DƯ ---
-tong_so_du = 0
+# Xử lý số dư và tiền thực tế
 if not df_existing.empty:
-    # Tính số tiền thực tế (Thu + , Chi -)
+    df_existing['Ngay'] = pd.to_datetime(df_existing['Ngay'])
     df_existing['so_tien_plus'] = df_existing.apply(
         lambda x: x['so tien'] if x['Loai'] == 'Thu nhập' else -x['so tien'], axis=1
     )
-    # Tính số dư lũy kế từng dòng
     df_existing['Số dư sau GD'] = df_existing['so_tien_plus'].cumsum()
     tong_so_du = df_existing['so_tien_plus'].sum()
+else:
+    tong_so_du = 0
 
-formatted_balance = f"{tong_so_du:,.0f}".replace(",", ".")
+# --- APP NAVIGATION ---
+tab1, tab2, tab3 = st.tabs(["🏠 Trang chủ", "💸 Nhập liệu", "📊 Lịch sử"])
 
-# --- XỬ LÝ ĐỊNH DẠNG SỐ TIỀN NHẬP ---
-if 'so_tien_formatted' not in st.session_state:
-    st.session_state['so_tien_formatted'] = "0"
+# ==========================================
+# TAB 1: TRANG CHỦ (DASHBOARD)
+# ==========================================
+with tab1:
+    st.markdown(f"### Chào sếp Canhnho! 👋")
+    
+    # Hiển thị số dư chính
+    st.metric("Số dư hiện tại", f"{tong_so_du:,.0f} VNĐ".replace(",", "."), delta=None)
+    
+    if not df_existing.empty:
+        col_in, col_out = st.columns(2)
+        with col_in:
+            tong_thu = df_existing[df_existing['Loai'] == 'Thu nhập']['so tien'].sum()
+            st.metric("Tổng Thu", f"{tong_thu:,.0f}".replace(",", "."), delta_color="normal")
+        with col_out:
+            tong_chi = df_existing[df_existing['Loai'] == 'Chi tiêu']['so tien'].sum()
+            st.metric("Tổng Chi", f"-{tong_chi:,.0f}".replace(",", "."), delta_color="inverse")
 
-def format_amount_callback():
-    # Lấy giá trị thô, xóa hết dấu chấm/phẩy
-    raw = st.session_state.so_tien_formatted.replace(".", "").replace(",", "").strip()
-    if raw.isdigit():
-        # Định dạng lại với dấu chấm
-        formatted = f"{int(raw):,}".replace(",", ".")
-        st.session_state.so_tien_formatted = formatted
-    elif raw == "":
-        st.session_state.so_tien_formatted = "0"
+        st.subheader("📈 Xu hướng gần đây")
+        # Chuẩn bị dữ liệu cho biểu đồ (Gộp theo ngày)
+        chart_data = df_existing.groupby(['Ngay', 'Loai'])['so tien'].sum().unstack(fill_value=0)
+        
+        # Định nghĩa màu sắc: Thu nhập (Xanh), Chi tiêu (Đỏ)
+        color_map = {"Thu nhập": "#2ecc71", "Chi tiêu": "#e74c3c"}
+        
+        # Hiển thị biểu đồ với màu tùy chỉnh
+        st.bar_chart(chart_data, color=[color_map.get(col, "#bdbdbd") for col in chart_data.columns])
+    else:
+        st.info("Chưa có dữ liệu để hiển thị biểu đồ sếp ơi!")
 
-# --- GIAO DIỆN ---
-st.title("☁️ Quản lý Tài chính Cloud")
+# ==========================================
+# TAB 2: NHẬP LIỆU
+# ==========================================
+with tab2:
+    st.subheader("📝 Thêm giao dịch mới")
+    
+    if 'so_tien_formatted' not in st.session_state:
+        st.session_state['so_tien_formatted'] = "0"
 
-# Hiển thị số dư nổi bật ở trên cùng
-col_user, col_balance = st.columns([1, 1])
-with col_user:
-    st.write(f"### Chào sếp Canhnho! 👋")
-with col_balance:
-    st.markdown(f"**Số dư hiện tại:**")
-    st.markdown(f"<h1 style='color: #00b4d8; margin-top: -20px;'>{formatted_balance} VNĐ</h1>", unsafe_allow_html=True)
+    def format_amount_callback():
+        raw = st.session_state.so_tien_formatted.replace(".", "").replace(",", "").strip()
+        if raw.isdigit():
+            formatted = f"{int(raw):,}".replace(",", ".")
+            st.session_state.so_tien_formatted = formatted
+        elif raw == "":
+            st.session_state.so_tien_formatted = "0"
 
-st.info("Dữ liệu này được lưu trực tiếp lên Google Sheets của sếp nên cực kỳ an toàn ạ!")
-
-# --- NHẬP LIỆU ---
-with st.expander("📝 Nhập Thu/Chi mới", expanded=True):
-    col1, col2 = st.columns(2)
-    with col1:
-        ngay = st.date_input("Ngày chi tiêu:", datetime.now())
-        loai = st.selectbox("Loại:", ["Thu nhập", "Chi tiêu"])
-    with col2:
-        # Ô nhập liệu tự động nhảy dấu chấm khi sếp nhập xong (ấn Enter hoặc Tab)
+    with st.container():
+        ngay = st.date_input("Ngày:", datetime.now())
+        loai = st.selectbox("Loại giao dịch:", ["Chi tiêu", "Thu nhập"])
+        
         st.text_input(
             "Số tiền (VNĐ):", 
             key="so_tien_formatted", 
             on_change=format_amount_callback,
-            help="Sếp nhập số xong ấn Enter hoặc Tab để em tự thêm dấu chấm nhé!"
+            help="Sếp nhập số xong em tự thêm dấu chấm nhé!"
         )
         
-        # Chuyển đổi giá trị hiển thị sang số thực để tính toán
         so_tien_clean = st.session_state.so_tien_formatted.replace(".", "")
-        if not so_tien_clean.isdigit() and so_tien_clean != "":
-            st.error("⚠️ Sếp ơi, ô này chỉ được nhập Số thôi ạ!")
-            so_tien = 0
-        else:
-            so_tien = int(so_tien_clean) if so_tien_clean else 0
+        so_tien = int(so_tien_clean) if so_tien_clean.isdigit() else 0
         
-        ghi_chu = st.text_input("Ghi chú:")
-    
-    # Nút lưu (không dùng form để hỗ trợ định dạng trực tiếp)
-    if st.button("Lưu lên Cloud ☁️", use_container_width=True):
-        if so_tien <= 0:
-            st.error("Dạ sếp, sếp vui lòng nhập số tiền lớn hơn 0 nhé! ❌")
-        else:
-            # Tạo dòng dữ liệu mới
-            new_data = pd.DataFrame([{
-                "Ngay": ngay.strftime("%Y-%m-%d"),
-                "Loai": loai,
-                "so tien": so_tien,
-                "Ghi chu": ghi_chu
-            }])
-            
-            # Gộp dữ liệu cũ và mới
-            updated_df = pd.concat([df_existing, new_data], ignore_index=True)
-            
-            # Ghi đè lại lên Google Sheets
-            conn.update(spreadsheet=url_sheet, worksheet=0, data=updated_df)
-            st.success("Dạ sếp, em đã đồng bộ lên Google Sheets thành công rồi ạ! ✅")
-            st.toast("Đã hoàn thành cập nhật lên Cloud! ☁️", icon="✅")
-            st.rerun() # Tải lại trang để cập nhật biểu đồ
+        ghi_chu = st.text_input("Ghi chú / Nội dung:")
+        
+        if st.button("Lưu lên Cloud ☁️", use_container_width=True):
+            if so_tien <= 0:
+                st.error("Dạ sếp, tiền phải lớn hơn 0 mới được ạ! ❌")
+            else:
+                new_data = pd.DataFrame([{
+                    "Ngay": ngay.strftime("%Y-%m-%d"),
+                    "Loai": loai,
+                    "so tien": so_tien,
+                    "Ghi chu": ghi_chu
+                }])
+                updated_df = pd.concat([df_existing.drop(columns=['so_tien_plus', 'Số dư sau GD', 'Month_Year'], errors='ignore'), new_data], ignore_index=True)
+                conn.update(spreadsheet=url_sheet, worksheet=0, data=updated_df)
+                st.success("Đã đồng bộ thành công! ✅")
+                st.toast("Đã hoàn thành cập nhật! ☁️", icon="✅")
+                st.rerun()
 
-# --- LỊCH SỬ GIAO DỊCH ---
-if not df_existing.empty:
-    st.subheader("📊 Lịch sử giao dịch từ Cloud")
-    
-    # Tạo bản sao để hiển thị
-    df_display = df_existing.copy()
-    
-    # Thêm cột STT (Số thứ tự) dựa trên vị trí thực tế trong file
-    df_display.insert(0, 'STT', range(1, len(df_display) + 1))
-    
-    # Định dạng các cột số sang chuỗi có dấu chấm kiểu Việt Nam
-    df_display["Số tiền (VNĐ)"] = df_display["so tien"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
-    df_display["Số dư sau GD"] = df_display["Số dư sau GD"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
-    
-    # Chỉ lấy 10 dòng cuối để hiển thị cho gọn
-    df_display = df_display.tail(10)
-    
-    # Sắp xếp lại thứ tự cột theo ý sếp: STT / Ngay / Loai / so tiền / ghi chu / số dư sau GD
-    columns_order = ["STT", "Ngay", "Loai", "Số tiền (VNĐ)", "Ghi chu", "Số dư sau GD"]
-    
-    # Hiển thị bảng
-    st.dataframe(
-        df_display[columns_order], 
-        use_container_width=True,
-        hide_index=True # Ẩn index mặc định của pandas vì đã có STT
-    )
-else:
-    st.warning("Chưa có dữ liệu trên Cloud, sếp nhập khoản đầu tiên nhé!")
+# ==========================================
+# TAB 3: LỊCH SỬ & SAO KÊ
+# ==========================================
+with tab3:
+    if not df_existing.empty:
+        st.subheader("🔍 Bộ lọc & Xuất file")
+        
+        filter_type = st.radio("Lọc theo:", ["Tất cả", "Tháng", "Khoảng ngày"], horizontal=True)
+        df_filtered = df_existing.copy()
+
+        if filter_type == "Tháng":
+            df_existing['Month_Year'] = df_existing['Ngay'].dt.strftime('%m/%Y')
+            month_list = sorted(df_existing['Month_Year'].unique().tolist(), reverse=True)
+            selected_month = st.selectbox("Chọn tháng:", month_list)
+            df_filtered = df_existing[df_existing['Month_Year'] == selected_month]
+        
+        elif filter_type == "Khoảng ngày":
+            col1, col2 = st.columns(2)
+            with col1:
+                d1 = st.date_input("Từ ngày:", df_existing['Ngay'].min())
+            with col2:
+                d2 = st.date_input("Đến ngày:", datetime.now())
+            df_filtered = df_existing[(df_existing['Ngay'] >= pd.to_datetime(d1)) & (df_existing['Ngay'] <= pd.to_datetime(d2))]
+
+        # --- NÚT XUẤT EXCEL ---
+        if not df_filtered.empty:
+            # Tạo file excel trong bộ nhớ
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Chỉ xuất các cột cần thiết
+                df_export = df_filtered[["Ngay", "Loai", "so tien", "Ghi chu", "Số dư sau GD"]].copy()
+                df_export['Ngay'] = df_export['Ngay'].dt.strftime('%d/%m/%Y')
+                df_export.to_excel(writer, index=False, sheet_name='SaoKe')
+            
+            processed_data = output.getvalue()
+            
+            st.download_button(
+                label="📥 Tải file Excel sao kê",
+                data=processed_data,
+                file_name=f"SaoKe_TaiChinh_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+            # Hiển thị bảng
+            st.markdown("---")
+            df_display = df_filtered.copy()
+            df_display.insert(0, 'STT', range(1, len(df_display) + 1))
+            df_display['Ngay'] = df_display['Ngay'].dt.strftime('%d/%m/%Y')
+            df_display["Tiền"] = df_display["so tien"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
+            df_display["Số dư"] = df_display["Số dư sau GD"].apply(lambda x: f"{x:,.0f}".replace(",", "."))
+            
+            st.dataframe(
+                df_display[["STT", "Ngay", "Loai", "Tiền", "Ghi chu", "Số dư"]], 
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.warning("Không tìm thấy dữ liệu phù hợp!")
+    else:
+        st.warning("Chưa có dữ liệu nào sếp ơi!")
