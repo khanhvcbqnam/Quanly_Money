@@ -52,7 +52,16 @@ df_existing = conn.read(spreadsheet=url_sheet, worksheet=0, ttl=0)
 
 # Xử lý số dư và tiền thực tế
 if not df_existing.empty:
-    df_existing['Ngay'] = pd.to_datetime(df_existing['Ngay'])
+    # Chuyển đổi ngày an toàn hơn, bỏ qua các dòng lỗi định dạng ngày
+    df_existing['Ngay'] = pd.to_datetime(df_existing['Ngay'], errors='coerce')
+    
+    # Bỏ các dòng không thể nhận diện ngày (ví dụ dòng trống hoặc sai định dạng)
+    invalid_dates = df_existing['Ngay'].isna().sum()
+    if invalid_dates > 0:
+        st.sidebar.warning(f"⚠️ Có {invalid_dates} dòng dữ liệu sai định dạng ngày và đã được bỏ qua.")
+    df_existing = df_existing.dropna(subset=['Ngay'])
+    
+    # Tiếp tục tính toán
     df_existing['so_tien_plus'] = df_existing.apply(
         lambda x: x['so tien'] if x['Loai'] == 'Thu nhập' else -x['so tien'], axis=1
     )
